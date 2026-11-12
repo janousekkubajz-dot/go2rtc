@@ -75,31 +75,53 @@ func (s *Server) GetSession(ssrc uint32) (session *Session) {
 	return
 }
 
+
 func (s *Server) handle() error {
-	b := make([]byte, 2048)
-	for {
-		n, _, err := s.conn.ReadFrom(b)
-		if err != nil {
-			return err
-		}
+    packets := make(chan []byte, 1024)
 
-		// Multiplexing RTP Data and Control Packets on a Single Port
-		// https://datatracker.ietf.org/doc/html/rfc5761
+    go func() {
+        for b := range packets {
+            switch packetType := b[1]; packetType {
+            case 99, 110, 0x80 | 99, 0x80 | 110:
+                if len(b) < 12 {
+                    continue
+                }
+                ssrc := binary.BigEndian.Uint32(b[8:])
+                if session := s.GetSession(ssrc); session != nil {
+                    session.ReadRTP(b)
+                }
 
-		switch packetType := b[1]; packetType {
-		case 99, 110, 0x80 | 99, 0x80 | 110:
-			// this is default position for SSRC in RTP packet
-			ssrc := binary.BigEndian.Uint32(b[8:])
-			if session := s.GetSession(ssrc); session != nil {
-				session.ReadRTP(b[:n])
-			}
+            case 200, 201, 202, 203, 204, 205, 206, 207:
+                if len(b) < 8 {
+                    continue
+                }
+                ssrc := binary.BigEndian.Uint32(b[4:])
+                if session := s.GetSession(ssrc); session != nil {
+                    session.ReadRTCP(b)
+                }
+            }
+        }
+    }()
 
-		case 200, 201, 202, 203, 204, 205, 206, 207:
-			// this is default position for SSRC in RTCP packet
-			ssrc := binary.BigEndian.Uint32(b[4:])
-			if session := s.GetSession(ssrc); session != nil {
-				session.ReadRTCP(b[:n])
-			}
-		}
-	}
+    b := make([]byte, 2048)
+    defer close(packets)
+
+    for {
+        n, _, err := s.conn.ReadFrom(b)
+        if err != nil {
+            return err
+        }
+        if n < 2 {
+            continue
+        }
+
+        packet := make([]byte, n)
+        copy(packet, b[:n])
+
+        select {
+        case packets <- packet:
+        default:
+            // Fronta je plna; zahodime paket.
+        }
+    }
 }
