@@ -40,7 +40,12 @@ type Endpoint struct {
 
 func (e *Endpoint) init() (err error) {
 	e.addr = &net.UDPAddr{IP: net.ParseIP(e.Addr), Port: int(e.Port)}
-	e.srtp, err = srtp.CreateContext(e.MasterKey, e.MasterSalt, profile(e.MasterKey))
+	e.srtp, err = srtp.CreateContext(
+    e.MasterKey,
+    e.MasterSalt,
+    profile(e.MasterKey),
+    srtp.SRTPReplayProtection(512),
+)
 	return
 }
 
