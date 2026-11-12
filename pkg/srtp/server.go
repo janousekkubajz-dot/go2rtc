@@ -42,9 +42,12 @@ func (s *Server) AddSession(session *Session) {
 	if len(s.sessions) == 0 {
 		var err error
 		if s.conn, err = net.ListenPacket("udp", s.address); err != nil {
-			return
-		}
-		go s.handle()
+    return
+	}
+	if udpConn, ok := s.conn.(*net.UDPConn); ok {
+    _ = udpConn.SetReadBuffer(4 << 20)
+	}
+	go s.handle()
 	}
 
 	session.conn = s.conn
