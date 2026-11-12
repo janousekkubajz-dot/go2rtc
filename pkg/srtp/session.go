@@ -16,10 +16,10 @@ type Session struct {
 	OnReadRTP func(packet *rtp.Packet)
 	reorder   *reorderBuffer
 
-	Recv int // bytes recv
-	Send int // bytes send
+	Recv int
+	Send int
 
-	conn net.PacketConn // local conn endpoint
+	conn net.PacketConn
 
 	PayloadType  uint8
 	RTCPInterval time.Duration
@@ -54,8 +54,6 @@ func profile(key []byte) srtp.ProtectionProfile {
 	switch len(key) {
 	case 16:
 		return srtp.ProtectionProfileAes128CmHmacSha1_80
-		//case 32:
-		//	return srtp.ProtectionProfileAes256CmHmacSha1_80
 	}
 	return 0
 }
@@ -68,6 +66,7 @@ func (s *Session) init() error {
 		return err
 	}
 
+	// The buffer is per SRTP session (and thus per RTP SSRC).
 	s.reorder = newReorderBuffer(func(packet *rtp.Packet) {
 		if s.OnReadRTP != nil {
 			s.OnReadRTP(packet)
@@ -76,15 +75,13 @@ func (s *Session) init() error {
 
 	s.senderRTCP.SSRC = s.Local.SSRC
 	s.senderTime = time.Now().Add(s.RTCPInterval)
-
 	return nil
 }
 
 func (s *Session) WriteRTP(packet *rtp.Packet) (int, error) {
 	if s.Local.srtp == nil {
-		return 0, nil // before init call
+		return 0, nil
 	}
-
 	if now := time.Now(); now.After(s.senderTime) {
 		s.senderRTCP.NTPTime = uint64(now.UnixNano())
 		s.senderTime = now.Add(s.RTCPInterval)
@@ -101,19 +98,16 @@ func (s *Session) WriteRTP(packet *rtp.Packet) (int, error) {
 		},
 		Payload: packet.Payload,
 	}
-
 	b, err := clone.Marshal()
 	if err != nil {
 		return 0, err
 	}
-
 	s.senderRTCP.PacketCount++
 	s.senderRTCP.RTPTime = clone.Timestamp
 	s.senderRTCP.OctetCount += uint32(len(clone.Payload))
 	if b, err = s.Local.srtp.EncryptRTP(nil, b, nil); err != nil {
 		return 0, err
 	}
-
 	return s.conn.WriteTo(b, s.Remote.addr)
 }
 
@@ -135,13 +129,13 @@ func (s *Session) ReadRTP(b []byte) {
 	if err != nil {
 		return
 	}
-
 	if err = packet.Unmarshal(b); err != nil {
 		return
 	}
-
 	if s.reorder != nil {
 		s.reorder.Push(packet)
+	} else if s.OnReadRTP != nil {
+		s.OnReadRTP(packet)
 	}
 }
 
@@ -151,18 +145,9 @@ func (s *Session) ReadRTCP(b []byte) {
 	if err != nil {
 		return
 	}
-	//packets, err := rtcp.Unmarshal(b)
-	//if err != nil {
-	//	return
-	//}
-	//if report, ok := packets[0].(*rtcp.SenderReport); ok {
-	//	log.Printf("[srtp] rtcp type=%d report=%v", header.Type, report)
-	//}
-
 	if header.Type != rtcp.TypeSenderReport {
 		return
 	}
-
 	receiverRTCP := rtcp.ReceiverReport{SSRC: s.Local.SSRC}
 	_, _ = s.WriteRTCP(&receiverRTCP)
 }

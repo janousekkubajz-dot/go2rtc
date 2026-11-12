@@ -27,23 +27,18 @@ func newReorderBuffer(deliver func(*rtp.Packet)) *reorderBuffer {
 	return r
 }
 
-func (r *reorderBuffer) Push(packet *rtp.Packet) {
-	if packet == nil {
-		return
-	}
+func (r *reorderBuffer) Push(p *rtp.Packet) {
 	select {
 	case <-r.done:
 		return
 	default:
 	}
 	select {
+	case r.input <- p:
 	case <-r.done:
-	case r.input <- packet:
 	}
 }
 
-// Close is safe to call more than once. It stops the worker even if no
-// packets arrive after the camera has disconnected.
 func (r *reorderBuffer) Close() {
 	r.once.Do(func() { close(r.done) })
 }
@@ -53,16 +48,16 @@ func (r *reorderBuffer) run(deliver func(*rtp.Packet)) {
 	defer ticker.Stop()
 
 	pending := make(map[uint16]*rtp.Packet)
-	var next uint16
+	var expected uint16
 	var started bool
 	var gapSince time.Time
 
-	flush := func(now time.Time) {
+	flush := func() {
 		for {
-			if p, ok := pending[next]; ok {
-				delete(pending, next)
+			if p, found := pending[expected]; found {
+				delete(pending, expected)
 				deliver(p)
-				next++
+				expected++
 				gapSince = time.Time{}
 				continue
 			}
@@ -71,55 +66,60 @@ func (r *reorderBuffer) run(deliver func(*rtp.Packet)) {
 				return
 			}
 			if gapSince.IsZero() {
-				gapSince = now
+				gapSince = time.Now()
 			}
-			if len(pending) < reorderDepth && now.Sub(gapSince) < reorderDelay {
+			if len(pending) < reorderDepth && time.Since(gapSince) < reorderDelay {
 				return
 			}
-			// Missing packet: move directly to the closest available
-			// sequence number, including across the uint16 wraparound.
-			bestDistance := uint16(0xffff)
-			var bestSeq uint16
+
+			// Jump directly to the closest available forward packet.
+			// Skipping a large gap one sequence number per 60 ms
+			// would otherwise freeze video for many seconds or minutes.
+			found := false
+			var closest uint16
+			var minDistance uint16
 			for seq := range pending {
-				distance := uint16(seq - next)
-				if distance < bestDistance {
-					bestDistance, bestSeq = distance, seq
+				d := seq - expected
+				if d < 0x8000 && (!found || d < minDistance) {
+					closest, minDistance, found = seq, d, true
 				}
 			}
-			next = bestSeq
+			if !found {
+				// All pending numbers are outside the forward half-window.
+				for seq := range pending {
+					closest = seq
+					break
+				}
+			}
+			expected = closest
 			gapSince = time.Time{}
 		}
 	}
 
 	for {
-		// Prioritize shutdown even when input is continuously busy.
-		select {
-		case <-r.done:
-			return
-		default:
-		}
 		select {
 		case <-r.done:
 			return
 		case p := <-r.input:
-			seq := p.SequenceNumber
-			if !started {
-				next = seq
-				started = true
-			}
-			// A negative signed distance represents an old/duplicate packet.
-			// Large jumps are treated as old rather than filling the buffer.
-			if int16(seq-next) < 0 {
+			if p == nil {
 				continue
 			}
-			if _, ok := pending[seq]; ok {
+			seq := p.SequenceNumber
+			if !started {
+				expected = seq
+				started = true
+			}
+			if int16(seq-expected) < 0 {
+				continue
+			}
+			if _, exists := pending[seq]; exists {
 				continue
 			}
 			pending[seq] = p
-			flush(time.Now())
-		case now := <-ticker.C:
+			flush()
+		case <-ticker.C:
 			if started {
-				flush(now)
+				flush()
 			}
 		}
 	}

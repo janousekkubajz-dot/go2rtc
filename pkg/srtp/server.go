@@ -37,13 +37,10 @@ func (s *Server) AddSession(session *Session) {
 	if err := session.init(); err != nil {
 		return
 	}
-
 	if len(s.sessions) == 0 {
 		var err error
 		if s.conn, err = net.ListenPacket("udp", s.address); err != nil {
-			if session.reorder != nil {
-				session.reorder.Close()
-			}
+			session.reorder.Close()
 			return
 		}
 		if udpConn, ok := s.conn.(*net.UDPConn); ok {
@@ -59,14 +56,16 @@ func (s *Server) AddSession(session *Session) {
 func (s *Server) DelSession(session *Session) {
 	s.mu.Lock()
 	delete(s.sessions, session.Remote.SSRC)
-	if session.reorder != nil {
-		session.reorder.Close()
-	}
+
 	if len(s.sessions) == 0 && s.conn != nil {
 		_ = s.conn.Close()
 		s.conn = nil
 	}
 	s.mu.Unlock()
+
+	if session.reorder != nil {
+		session.reorder.Close()
+	}
 }
 
 func (s *Server) GetSession(ssrc uint32) (session *Session) {
@@ -80,6 +79,9 @@ func (s *Server) handle(conn net.PacketConn) error {
 	packets := make(chan []byte, 1024)
 	go func() {
 		for b := range packets {
+			if len(b) < 2 {
+				continue
+			}
 			switch packetType := b[1]; packetType {
 			case 99, 110, 0x80 | 99, 0x80 | 110:
 				if len(b) < 12 {
@@ -111,12 +113,13 @@ func (s *Server) handle(conn net.PacketConn) error {
 		if n < 2 {
 			continue
 		}
+
 		packet := make([]byte, n)
 		copy(packet, b[:n])
 		select {
 		case packets <- packet:
 		default:
-			// Drop when saturated rather than blocking the UDP receiver.
+			// Never stall the UDP reader; discard only on queue overflow.
 		}
 	}
 }
