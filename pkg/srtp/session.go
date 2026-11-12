@@ -1,3 +1,35 @@
+package srtp
+
+import (
+	"net"
+	"time"
+
+	"github.com/pion/rtcp"
+	"github.com/pion/rtp"
+	"github.com/pion/srtp/v3"
+)
+
+type Session struct {
+	Local  *Endpoint
+	Remote *Endpoint
+
+	OnReadRTP func(packet *rtp.Packet)
+	reorder   *reorderBuffer
+
+	Recv int // bytes recv
+	Send int // bytes send
+
+	conn net.PacketConn // local conn endpoint
+
+	PayloadType  uint8
+	RTCPInterval time.Duration
+
+	senderRTCP rtcp.SenderReport
+	senderTime time.Time
+}
+
+type Endpoint struct {
+	Addr       string
 	Port       uint16
 	MasterKey  []byte
 	MasterSalt []byte
@@ -126,3 +158,11 @@ func (s *Session) ReadRTCP(b []byte) {
 	//if report, ok := packets[0].(*rtcp.SenderReport); ok {
 	//	log.Printf("[srtp] rtcp type=%d report=%v", header.Type, report)
 	//}
+
+	if header.Type != rtcp.TypeSenderReport {
+		return
+	}
+
+	receiverRTCP := rtcp.ReceiverReport{SSRC: s.Local.SSRC}
+	_, _ = s.WriteRTCP(&receiverRTCP)
+}
