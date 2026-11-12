@@ -1,0 +1,49 @@
+name: Test go2rtc ARM64 (Raspberry Pi)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  arm64-native:
+    name: ARM64 native build and SRTP tests
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    env:
+      CGO_ENABLED: '0'
+      GOOS: linux
+      GOARCH: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Verify ARM64 runner
+        run: |
+          uname -m
+          test "$(uname -m)" = "aarch64"
+          go version
+
+      - name: Test SRTP packet handling
+        run: go test ./pkg/srtp -count=1 -v
+
+      - name: Build native ARM64 binary
+        run: go build -ldflags='-s -w' -trimpath -o go2rtc_arm64 .
+
+      - name: Run ARM64 binary natively
+        run: |
+          file go2rtc_arm64
+          ./go2rtc_arm64 -version
+
+      - name: Upload tested ARM64 binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: go2rtc_linux_arm64_native_tested
+          path: go2rtc_arm64
+          if-no-files-found: error
