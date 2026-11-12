@@ -1,34 +1,3 @@
-package srtp
-
-import (
-	"net"
-	"time"
-
-	"github.com/pion/rtcp"
-	"github.com/pion/rtp"
-	"github.com/pion/srtp/v3"
-)
-
-type Session struct {
-	Local  *Endpoint
-	Remote *Endpoint
-
-	OnReadRTP func(packet *rtp.Packet)
-
-	Recv int // bytes recv
-	Send int // bytes send
-
-	conn net.PacketConn // local conn endpoint
-
-	PayloadType  uint8
-	RTCPInterval time.Duration
-
-	senderRTCP rtcp.SenderReport
-	senderTime time.Time
-}
-
-type Endpoint struct {
-	Addr       string
 	Port       uint16
 	MasterKey  []byte
 	MasterSalt []byte
@@ -41,11 +10,11 @@ type Endpoint struct {
 func (e *Endpoint) init() (err error) {
 	e.addr = &net.UDPAddr{IP: net.ParseIP(e.Addr), Port: int(e.Port)}
 	e.srtp, err = srtp.CreateContext(
-    e.MasterKey,
-    e.MasterSalt,
-    profile(e.MasterKey),
-    srtp.SRTPReplayProtection(512),
-)
+		e.MasterKey,
+		e.MasterSalt,
+		profile(e.MasterKey),
+		srtp.SRTPReplayProtection(512),
+	)
 	return
 }
 
@@ -67,6 +36,12 @@ func (s *Session) init() error {
 		return err
 	}
 
+	s.reorder = newReorderBuffer(func(packet *rtp.Packet) {
+		if s.OnReadRTP != nil {
+			s.OnReadRTP(packet)
+		}
+	})
+
 	s.senderRTCP.SSRC = s.Local.SSRC
 	s.senderTime = time.Now().Add(s.RTCPInterval)
 
@@ -83,7 +58,6 @@ func (s *Session) WriteRTP(packet *rtp.Packet) (int, error) {
 		s.senderTime = now.Add(s.RTCPInterval)
 		_, _ = s.WriteRTCP(&s.senderRTCP)
 	}
-
 	clone := rtp.Packet{
 		Header: rtp.Header{
 			Version:        2,
@@ -104,7 +78,6 @@ func (s *Session) WriteRTP(packet *rtp.Packet) (int, error) {
 	s.senderRTCP.PacketCount++
 	s.senderRTCP.RTPTime = clone.Timestamp
 	s.senderRTCP.OctetCount += uint32(len(clone.Payload))
-
 	if b, err = s.Local.srtp.EncryptRTP(nil, b, nil); err != nil {
 		return 0, err
 	}
@@ -126,7 +99,6 @@ func (s *Session) WriteRTCP(packet rtcp.Packet) (int, error) {
 
 func (s *Session) ReadRTP(b []byte) {
 	packet := &rtp.Packet{}
-
 	b, err := s.Remote.srtp.DecryptRTP(nil, b, &packet.Header)
 	if err != nil {
 		return
@@ -136,8 +108,8 @@ func (s *Session) ReadRTP(b []byte) {
 		return
 	}
 
-	if s.OnReadRTP != nil {
-		s.OnReadRTP(packet)
+	if s.reorder != nil {
+		s.reorder.Push(packet)
 	}
 }
 
@@ -147,7 +119,6 @@ func (s *Session) ReadRTCP(b []byte) {
 	if err != nil {
 		return
 	}
-
 	//packets, err := rtcp.Unmarshal(b)
 	//if err != nil {
 	//	return
@@ -155,11 +126,3 @@ func (s *Session) ReadRTCP(b []byte) {
 	//if report, ok := packets[0].(*rtcp.SenderReport); ok {
 	//	log.Printf("[srtp] rtcp type=%d report=%v", header.Type, report)
 	//}
-
-	if header.Type != rtcp.TypeSenderReport {
-		return
-	}
-
-	receiverRTCP := rtcp.ReceiverReport{SSRC: s.Local.SSRC}
-	_, _ = s.WriteRTCP(&receiverRTCP)
-}
