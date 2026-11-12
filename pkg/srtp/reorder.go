@@ -1,109 +1,126 @@
-
 package srtp
 
 import (
-    "time"
+	"sync"
+	"time"
 
-    "github.com/pion/rtp"
+	"github.com/pion/rtp"
 )
 
 const (
-    reorderDepth = 32
-    reorderDelay = 60 * time.Millisecond
+	reorderDepth = 32
+	reorderDelay = 60 * time.Millisecond
 )
 
 type reorderBuffer struct {
-    input chan *rtp.Packet
-    done  chan struct{}
+	input chan *rtp.Packet
+	done  chan struct{}
+	once  sync.Once
 }
 
 func newReorderBuffer(deliver func(*rtp.Packet)) *reorderBuffer {
-    r := &reorderBuffer{
-        input: make(chan *rtp.Packet, 1024),
-        done:  make(chan struct{}),
-    }
-    go r.run(deliver)
-    return r
+	r := &reorderBuffer{
+		input: make(chan *rtp.Packet, 1024),
+		done:  make(chan struct{}),
+	}
+	go r.run(deliver)
+	return r
 }
 
-func (r *reorderBuffer) Push(p *rtp.Packet) {
-    select {
-    case r.input <- p:
-    case <-r.done:
-    }
+func (r *reorderBuffer) Push(packet *rtp.Packet) {
+	if packet == nil {
+		return
+	}
+	select {
+	case <-r.done:
+		return
+	default:
+	}
+	select {
+	case <-r.done:
+	case r.input <- packet:
+	}
 }
 
+// Close is safe to call more than once. It stops the worker even if no
+// packets arrive after the camera has disconnected.
 func (r *reorderBuffer) Close() {
-    close(r.done)
+	r.once.Do(func() { close(r.done) })
 }
 
 func (r *reorderBuffer) run(deliver func(*rtp.Packet)) {
-    ticker := time.NewTicker(10 * time.Millisecond)
-    defer ticker.Stop()
+	ticker := time.NewTicker(5 * time.Millisecond)
+	defer ticker.Stop()
 
-    pending := make(map[uint16]*rtp.Packet)
-    var expected uint16
-    var started bool
-    var gapSince time.Time
+	pending := make(map[uint16]*rtp.Packet)
+	var next uint16
+	var started bool
+	var gapSince time.Time
 
-    flush := func() {
-        for {
-            if p, ok := pending[expected]; ok {
-                delete(pending, expected)
-                deliver(p)
-                expected++
-                gapSince = time.Time{}
-                continue
-            }
+	flush := func(now time.Time) {
+		for {
+			if p, ok := pending[next]; ok {
+				delete(pending, next)
+				deliver(p)
+				next++
+				gapSince = time.Time{}
+				continue
+			}
+			if len(pending) == 0 {
+				gapSince = time.Time{}
+				return
+			}
+			if gapSince.IsZero() {
+				gapSince = now
+			}
+			if len(pending) < reorderDepth && now.Sub(gapSince) < reorderDelay {
+				return
+			}
+			// Missing packet: move directly to the closest available
+			// sequence number, including across the uint16 wraparound.
+			bestDistance := uint16(0xffff)
+			var bestSeq uint16
+			for seq := range pending {
+				distance := uint16(seq - next)
+				if distance < bestDistance {
+					bestDistance, bestSeq = distance, seq
+				}
+			}
+			next = bestSeq
+			gapSince = time.Time{}
+		}
+	}
 
-            if len(pending) == 0 {
-                gapSince = time.Time{}
-                return
-            }
-
-            if gapSince.IsZero() {
-                gapSince = time.Now()
-            }
-
-            if len(pending) < reorderDepth &&
-                time.Since(gapSince) < reorderDelay {
-                return
-            }
-
-            expected++
-            gapSince = time.Time{}
-        }
-    }
-
-    for {
-        select {
-        case p := <-r.input:
-            seq := p.SequenceNumber
-
-            if !started {
-                expected = seq
-                started = true
-            }
-
-            diff := int16(seq - expected)
-            if diff < 0 {
-                continue
-            }
-
-            if _, exists := pending[seq]; exists {
-                continue
-            }
-
-            pending[seq] = p
-            flush()
-
-        case <-ticker.C:
-            if started {
-                flush()
-            }
-
-        case <-r.done:
-            return
-        }
-    }
+	for {
+		// Prioritize shutdown even when input is continuously busy.
+		select {
+		case <-r.done:
+			return
+		default:
+		}
+		select {
+		case <-r.done:
+			return
+		case p := <-r.input:
+			seq := p.SequenceNumber
+			if !started {
+				next = seq
+				started = true
+			}
+			// A negative signed distance represents an old/duplicate packet.
+			// Large jumps are treated as old rather than filling the buffer.
+			if int16(seq-next) < 0 {
+				continue
+			}
+			if _, ok := pending[seq]; ok {
+				continue
+			}
+			pending[seq] = p
+			flush(time.Now())
+		case now := <-ticker.C:
+			if started {
+				flush(now)
+			}
+		}
+	}
 }
